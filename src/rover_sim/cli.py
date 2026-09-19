@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from rover_sim.env import Action, RoverEnv
 from rover_sim.grid import generate_grid
-from rover_sim.policies import Policy, RandomPolicy, ReflexPolicy
+from rover_sim.policies import ModelBasedPolicy, Policy, RandomPolicy, ReflexPolicy
 from rover_sim.render import render_grid
 
 app = typer.Typer()
 
-_POLICIES: dict[str, type] = {
-    "random": RandomPolicy,
-    "reflex": ReflexPolicy,
+# Built through small factories rather than stored as bare classes: the
+# model-based agent needs the survey dimensions, the other two do not, and a
+# uniform (seed, height, width) signature keeps the call site free of
+# per-policy branching.
+_POLICIES: dict[str, Callable[[int, int, int], Policy]] = {
+    "random": lambda seed, height, width: RandomPolicy(seed=seed),
+    "reflex": lambda seed, height, width: ReflexPolicy(seed=seed),
+    "model-based": lambda seed, height, width: ModelBasedPolicy(
+        seed=seed, height=height, width=width
+    ),
 }
 
 
@@ -57,12 +66,13 @@ def show_map(
 
 @app.command(name="run")
 def run(
-    policy: str = "reflex",
+    policy: str = "model-based",
     seed: int = 42,
     max_steps: int = 200,
     sensor_radius: int = 1,
     trace: int = 30,
     show_map: bool = False,
+    show_belief: bool = False,
 ) -> None:
     """Run one episode with the chosen policy and print its trajectory."""
     if policy not in _POLICIES:
@@ -74,7 +84,7 @@ def run(
 
     console = Console()
     env = RoverEnv(max_steps=max_steps, sensor_radius=sensor_radius)
-    agent: Policy = _POLICIES[policy](seed=seed)
+    agent: Policy = _POLICIES[policy](seed, env.height, env.width)
 
     agent.reset()
     obs, info = env.reset(seed=seed)
@@ -136,6 +146,18 @@ def run(
         f"distinct cells visited: {len(visited)} "
         f"([bold]{reach:.2f}[/bold] per step)   total reward: {total_reward:.1f}"
     )
+
+    belief = getattr(agent, "belief_map", None)
+    if belief is not None:
+        known = int(agent.known_cells)
+        total = belief.size
+        console.print(
+            f"map known to the agent: {known}/{total} cells "
+            f"([bold]{known / total:.0%}[/bold])"
+        )
+        if show_belief:
+            console.print("\n[bold]The agent's belief map[/bold] (? = never seen):")
+            render_grid(belief, agent_pos=info["position"], console=console)
 
 
 if __name__ == "__main__":
