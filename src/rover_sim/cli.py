@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from rover_sim.animate import Frame, save_animation
 from rover_sim.env import Action, RoverEnv
 from rover_sim.grid import generate_grid
 from rover_sim.logging_utils import Step, write_summary_json, write_trajectory_csv
@@ -66,6 +68,38 @@ def show_map(
     render_grid(grid, agent_pos=base_pos)
 
 
+def _snapshot(
+    env: RoverEnv,
+    agent: Policy,
+    info: dict[str, Any],
+    step: int,
+    action: int | None,
+    mode: str,
+) -> Frame:
+    """Capture one animation frame.
+
+    Reaching into env._grid is the experimenter looking over the rover's
+    shoulder, the same liberty --show-map already takes. Both grids are copied
+    because both keep changing underneath us: resources vanish as they are
+    collected, and the belief map is rewritten every step.
+    """
+    belief = getattr(agent, "belief_map", None)
+    return Frame(
+        step=step,
+        true_grid=env.unwrapped._grid.copy(),
+        belief=None if belief is None else belief.copy(),
+        position=info["position"],
+        action=action,
+        energy=int(info["energy"]),
+        samples=int(info["samples"]),
+        total_resources=int(info["total_resources"]),
+        storm=bool(info["storm"]),
+        mode=mode,
+        reason=getattr(agent, "return_reason", None),
+        route=getattr(agent, "route_home", None) if mode == "RETURNING" else None,
+    )
+
+
 @app.command(name="run")
 def run(
     policy: str = "model-based",
@@ -77,6 +111,9 @@ def run(
     trace: int = 30,
     show_map: bool = False,
     show_belief: bool = False,
+    animate: bool = False,
+    video_format: str = "mp4",
+    fps: int = 8,
     log_dir: str = "runs",
 ) -> None:
     """Run one episode with the chosen policy and print its trajectory.
@@ -87,10 +124,27 @@ def run(
     fires first; --storm-prob 0 lets a run finish its survey instead, and a
     small --max-energy forces the energy-margin case.
     """
+    # Everything the caller could have got wrong is checked before the episode
+    # runs: finding out that "avi" is not a video format after 200 steps of
+    # simulation is a waste of the user's time.
     if policy not in _POLICIES:
         known = ", ".join(sorted(_POLICIES))
         typer.secho(
             f"Error: unknown policy '{policy}'. Try: {known}", fg="red", err=True
+        )
+        raise typer.Exit(code=1)
+    if animate and video_format not in ("mp4", "gif"):
+        typer.secho(
+            f"Error: unsupported --video-format '{video_format}': use mp4 or gif",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if animate and not log_dir:
+        typer.secho(
+            'Error: --animate needs somewhere to write; drop --log-dir ""',
+            fg="red",
+            err=True,
         )
         raise typer.Exit(code=1)
 
@@ -118,6 +172,7 @@ def run(
 
     visited: set[tuple[int, int]] = {info["position"]}
     trajectory: list[Step] = []
+    frames: list[Frame] = []
     total_reward = 0.0
     steps = 0
     mode = ""
@@ -125,6 +180,13 @@ def run(
 
     for step in range(1, max_steps + 1):
         action = agent.act(obs)
+        # act() has already perceived, so the agent's belief and the world's
+        # state now describe the same moment: the rover standing where it is,
+        # about to do `action`. Snapshot before env.step() moves it on.
+        mode = str(getattr(agent, "mode", ""))
+        if animate:
+            frames.append(_snapshot(env, agent, info, step - 1, action, mode))
+
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         steps = step
@@ -159,6 +221,9 @@ def run(
         # giving up is a judgement, and judgements belong to the agent.
         if mode in ("DONE", "FAILED"):
             break
+
+    if animate:
+        frames.append(_snapshot(env, agent, info, steps, None, mode))
 
     console.print(table)
     if steps > trace:
@@ -230,6 +295,20 @@ def run(
             },
         )
         console.print(f"[dim]log written to {out}/[/dim]")
+        if animate:
+            try:
+                video = save_animation(
+                    out / "trajectory",
+                    frames,
+                    policy=policy,
+                    seed=seed,
+                    fps=fps,
+                    fmt=video_format,
+                )
+            except (ValueError, RuntimeError) as exc:
+                typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1) from exc
+            console.print(f"[dim]animation written to {video}[/dim]")
 
 
 if __name__ == "__main__":

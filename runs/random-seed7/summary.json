@@ -1,0 +1,24 @@
+{
+  "policy": "random",
+  "seed": 7,
+  "outcome": "truncated",
+  "return_reason": null,
+  "steps": 40,
+  "samples": 0,
+  "total_resources": 5,
+  "energy_left": 165,
+  "storm": true,
+  "base_pos": [
+    2,
+    13
+  ],
+  "final_pos": [
+    3,
+    12
+  ],
+  "distinct_cells_visited": 13,
+  "distinct_cells_per_step": 0.325,
+  "map_known_cells": null,
+  "map_total_cells": null,
+  "total_reward": -4.0
+}

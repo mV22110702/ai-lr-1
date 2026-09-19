@@ -362,6 +362,15 @@ class ModelBasedPolicy:
         return 0 <= row < self.height and 0 <= col < self.width
 
     @property
+    def route_home(self) -> list[Coord]:
+        """The currently planned way back, for logging and visualisation.
+
+        A copy: handing out the live list would let a caller edit the rover's
+        plan out from under it.
+        """
+        return list(self._route_home)
+
+    @property
     def known_cells(self) -> int:
         """How much of the map the rover has mapped."""
         return int((self.belief_map != CellType.UNKNOWN).sum())

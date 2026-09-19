@@ -3,11 +3,11 @@
   "seed": 42,
   "outcome": "truncated",
   "return_reason": null,
-  "steps": 200,
+  "steps": 60,
   "samples": 1,
   "total_resources": 5,
-  "energy_left": 198,
-  "storm": true,
+  "energy_left": 199,
+  "storm": false,
   "base_pos": [
     7,
     3
@@ -17,8 +17,8 @@
     3
   ],
   "distinct_cells_visited": 3,
-  "distinct_cells_per_step": 0.015,
+  "distinct_cells_per_step": 0.05,
   "map_known_cells": null,
   "map_total_cells": null,
-  "total_reward": -10.0
+  "total_reward": 4.0
 }
