@@ -1,0 +1,24 @@
+{
+  "policy": "model-based",
+  "seed": 42,
+  "outcome": "returned_to_base",
+  "return_reason": "storm",
+  "steps": 99,
+  "samples": 4,
+  "total_resources": 5,
+  "energy_left": 200,
+  "storm": true,
+  "base_pos": [
+    7,
+    3
+  ],
+  "final_pos": [
+    7,
+    3
+  ],
+  "distinct_cells_visited": 70,
+  "distinct_cells_per_step": 0.707,
+  "map_known_cells": 134,
+  "map_total_cells": 192,
+  "total_reward": 29.1
+}

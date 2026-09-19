@@ -28,38 +28,29 @@ UNKNOWN, fills in only where the rover has actually been, and may be stale
 where the world changed out of sight. Everything that plans a route -- getting
 home at the end of this lab, the search algorithms of labs 2 and 3 -- plans
 over this map, never over the environment's.
+
+On top of the belief map sits the mode machine the lab asks for
+(EXPLORING -> RETURNING -> DONE, with FAILED for a flat battery). It is what
+turns "wander and grab things" into "explore until the goal is met or
+conditions turn unfavourable, then come home".
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 
 from rover_sim.env import MOVES, Action
 from rover_sim.grid import CellType, Coord, neighbors4
+from rover_sim.logging_utils import Step
+from rover_sim.pathfinding import bfs_path, reachable_cells
 
 Mode = Literal["EXPLORING", "RETURNING", "DONE", "FAILED"]
 
-
-@dataclass(frozen=True)
-class Step:
-    """One row of the agent's own trajectory log.
-
-    The agent records what *it* knew at the time, not the truth: this is the
-    evidence for the report in Milestone 7, and it has to be honest about
-    partial observability. Frozen because a logged step is history -- nothing
-    should be able to edit it after the fact.
-    """
-
-    step: int
-    position: Coord
-    action: int
-    energy: int
-    samples: int
-    storm: bool
-    mode: Mode
+# The inverse of MOVES: given the cell I want to step onto, which action gets
+# me there? Needed to turn a planned path back into actions.
+_DELTA_TO_ACTION: dict[Coord, Action] = {delta: act for act, delta in MOVES.items()}
 
 
 class ModelBasedPolicy:
@@ -68,16 +59,31 @@ class ModelBasedPolicy:
     Grid *dimensions* are handed to the constructor rather than perceived.
     That is not a hole in the agent/environment wall: the size of the survey
     area is mission briefing, known before the rover lands. Its *contents* are
-    exactly what the agent has to discover.
+    exactly what the agent has to discover. The same goes for the energy
+    tariff -- a rover knows what its own motors cost to run.
     """
 
     name = "model-based"
 
     def __init__(
-        self, seed: int | None = None, height: int = 12, width: int = 16
+        self,
+        seed: int | None = None,
+        height: int = 12,
+        width: int = 16,
+        move_cost: int = 1,
+        hazard_cost: int = 3,
+        safety_margin: float = 1.3,
     ) -> None:
         self.height = height
         self.width = width
+        self.move_cost = move_cost
+        self.hazard_cost = hazard_cost
+        # Head home while the trip still costs 30% less than the battery
+        # holds. The margin is not decoration: the route is planned over a
+        # belief map that can be wrong, a storm can double every cost
+        # mid-journey, and arriving with an empty battery one cell short of
+        # base scores exactly the same as never leaving.
+        self.safety_margin = safety_margin
         self._seed = seed
         self._rng = np.random.default_rng(seed)
         self.reset()
@@ -100,8 +106,10 @@ class ModelBasedPolicy:
         self.position: Coord = (0, 0)
         self.base_pos: Coord | None = None
         self.mode: Mode = "EXPLORING"
+        self.return_reason: str | None = None
         self.trajectory: list[Step] = []
         self._steps = 0
+        self._route_home: list[Coord] = []
         # visited answers "have I been here"; the counts answer "how often",
         # which is what breaks a tie between two cells the rover has both
         # seen. Keeping the plain set as well is deliberate -- it is the
@@ -149,23 +157,104 @@ class ModelBasedPolicy:
         self.storm = bool(obs["storm"])
         if self.base_pos is None:
             # The first cell the rover ever stands on is base, by construction
-            # of the environment. Worth remembering: Milestone 5 has to plan a
-            # route back to it.
+            # of the environment. Worth remembering: there is no percept for
+            # "where is home", and the route back has to aim somewhere.
             self.base_pos = new_pos
 
         self._update_mode()
 
-    def _update_mode(self) -> None:
-        """The mode state machine -- only the transitions this agent can honour.
+    # ------------------------------------------------------------------
+    # The mode machine: explore, then come home
+    # ------------------------------------------------------------------
 
-        EXPLORING -> FAILED is the one that is real today. The other three
-        (going home when the goal is met, when energy runs low, when a storm
-        starts) all need a route home to be worth anything, and the route
-        planner is the next step. Declaring RETURNING here while still
-        wandering greedily would be a lie told by the state machine.
+    def _update_mode(self) -> None:
+        """EXPLORING -> RETURNING -> DONE, with FAILED if the battery dies.
+
+        Re-evaluated from scratch every single step, never latched on a
+        one-off reading. Under partial observability the numbers that decide
+        this keep changing: the route home gets shorter as the belief map
+        improves, and a storm doubles its cost the moment it starts.
         """
+        if self.mode in ("DONE", "FAILED"):
+            return
+
         if self.energy <= 0:
             self.mode = "FAILED"
+            return
+
+        # Plan the way home first: two of the three triggers below need to
+        # know what the trip costs, and RETURNING needs the route anyway.
+        self._route_home = self._plan_route_home()
+
+        if self.mode == "EXPLORING":
+            reason = self._reason_to_go_home()
+            if reason is not None:
+                self.mode = "RETURNING"
+                self.return_reason = reason
+
+        if self.mode == "RETURNING" and self.position == self.base_pos:
+            self.mode = "DONE"
+
+    def _reason_to_go_home(self) -> str | None:
+        """The three conditions from the brief, in priority order.
+
+        Cheapest and most certain first: a finished survey is a fact about the
+        belief map, a storm is a direct percept, and the energy margin is an
+        estimate built on top of a plan.
+        """
+        if self._survey_complete():
+            return "survey complete"
+        if self.storm:
+            return "storm"
+        if self._route_home and self.energy <= self._trip_cost() * self.safety_margin:
+            return "energy margin"
+        return None
+
+    def _survey_complete(self) -> bool:
+        """Nothing left worth walking to: no reachable resource, no frontier.
+
+        "Reachable" is judged over known cells only, so a pocket of the map
+        sealed off behind obstacles does not keep the rover out forever. A
+        frontier cell is a known, walkable cell that touches something
+        unknown -- somewhere the rover could stand and learn something new.
+        """
+        reach = reachable_cells(self.belief_map, self.position)
+        if any(self.belief_map[cell] == CellType.RESOURCE for cell in reach):
+            return False
+        for cell in reach:
+            for neighbour in neighbors4(cell, self.height, self.width):
+                if self.belief_map[neighbour] == CellType.UNKNOWN:
+                    return False
+        return True
+
+    def _plan_route_home(self) -> list[Coord]:
+        """The cells to step on to reach base, shortest first. Empty if home.
+
+        Unknown cells are impassable, which sounds risky and is not: the rover
+        walked out here, so a route made only of cells it has already seen
+        provably exists. The fallback that lets the planner gamble on unknown
+        cells is there for the pathological case where the belief map got
+        stale, and should essentially never fire.
+        """
+        if self.base_pos is None or self.position == self.base_pos:
+            return []
+        path = bfs_path(self.belief_map, self.position, self.base_pos)
+        if path is None:
+            path = bfs_path(
+                self.belief_map, self.position, self.base_pos, unknown_passable=True
+            )
+        return path or []
+
+    def _trip_cost(self) -> int:
+        """Energy the planned route home will burn, on current information."""
+        cost = 0
+        for cell in self._route_home:
+            cost += (
+                self.hazard_cost
+                if self.belief_map[cell] == CellType.HAZARD
+                else self.move_cost
+            )
+        return cost * 2 if self.storm else cost
 
     # ------------------------------------------------------------------
     # Acting
@@ -178,7 +267,7 @@ class ModelBasedPolicy:
 
         self._steps += 1
         self.trajectory.append(
-            Step(
+            Step.build(
                 step=self._steps,
                 position=self.position,
                 action=action,
@@ -193,9 +282,29 @@ class ModelBasedPolicy:
 
     def _choose_action(self) -> int:
         """RULE_MATCH: the rules now read the belief map, not just the percept."""
+        if self.mode in ("DONE", "FAILED"):
+            return int(Action.WAIT)
+
+        # Worth one step in either mode: the rover is already standing on it,
+        # and a sample left behind is the whole point of the mission missed.
         if self.belief_map[self.position] == CellType.RESOURCE:
             return int(Action.COLLECT)
 
+        if self.mode == "RETURNING":
+            return self._step_along_route()
+
+        return self._explore()
+
+    def _step_along_route(self) -> int:
+        """Take the first move of the planned route home."""
+        if not self._route_home:
+            return int(Action.WAIT)  # no way back on current knowledge
+        next_cell = self._route_home[0]
+        delta = (next_cell[0] - self.position[0], next_cell[1] - self.position[1])
+        return int(_DELTA_TO_ACTION[delta])
+
+    def _explore(self) -> int:
+        """Greedy exploration: step onto the most promising neighbour."""
         candidates = [
             (action, cell)
             for action, cell in self._neighbour_moves()
@@ -225,8 +334,7 @@ class ModelBasedPolicy:
         2. whether it is a hazard: hazards cost 3 energy instead of 1, so
            between two equally fresh cells, take the safe one.
         3. how much unknown territory it touches, negated: of two fresh cells,
-           prefer the one facing more of the unmapped map. This is a cheap
-           stand-in for the real frontier search of Milestone 6.
+           prefer the one facing more of the unmapped map.
         """
         visits = self._visit_counts.get(cell, 0)
         is_hazard = int(self.belief_map[cell] == CellType.HAZARD)
@@ -255,5 +363,5 @@ class ModelBasedPolicy:
 
     @property
     def known_cells(self) -> int:
-        """How much of the map the rover has mapped -- the Milestone 4 metric."""
+        """How much of the map the rover has mapped."""
         return int((self.belief_map != CellType.UNKNOWN).sum())

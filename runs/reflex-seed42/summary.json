@@ -1,0 +1,24 @@
+{
+  "policy": "reflex",
+  "seed": 42,
+  "outcome": "truncated",
+  "return_reason": null,
+  "steps": 200,
+  "samples": 1,
+  "total_resources": 5,
+  "energy_left": 198,
+  "storm": true,
+  "base_pos": [
+    7,
+    3
+  ],
+  "final_pos": [
+    6,
+    3
+  ],
+  "distinct_cells_visited": 3,
+  "distinct_cells_per_step": 0.015,
+  "map_known_cells": null,
+  "map_total_cells": null,
+  "total_reward": -10.0
+}
