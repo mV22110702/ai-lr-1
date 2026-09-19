@@ -1,7 +1,7 @@
 [project]
 name = "rover-sim"
 version = "0.1.0"
-description = "Add your description here"
+description = "Exploration rover simulator: a model-based agent on a 2D grid world"
 readme = "README.md"
 authors = [
     { name = "maksym", email = "maksym@email.com" }
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rover-sim = "rover_sim:main"
+rover-sim = "rover_sim.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.12.16,<0.13.0"]

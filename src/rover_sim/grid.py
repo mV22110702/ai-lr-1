@@ -94,7 +94,9 @@ def generate_grid(
         obstacle_mask = rng.random((height, width)) < obstacle_density
         grid[obstacle_mask] = CellType.OBSTACLE
 
-        free_cells = [(int(r), int(c)) for r, c in zip(*np.where(grid == CellType.FREE))]
+        free_cells = [
+            (int(r), int(c)) for r, c in zip(*np.where(grid == CellType.FREE))
+        ]
         rng.shuffle(free_cells)
 
         needed = 1 + num_resources + num_hazards
